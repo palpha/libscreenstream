@@ -44,6 +44,108 @@ struct ScreenCapturerConfig {
     }
 }
 
+@available(macOS 14.4, *)
+class ScreenCapturer2: NSObject, SCStreamOutput {
+    private let config: ScreenCapturerConfig
+    private var frameBuffer: Data
+    private let onFrameCaptured: (Data) -> Void
+
+    private var stream: SCStream?
+
+    init(
+        config: ScreenCapturerConfig,
+        onFrameCaptured: @escaping (Data) -> Void
+    ) {
+        self.config = config
+        self.frameBuffer = Data(count: Int(config.width * config.height * 4))
+        self.onFrameCaptured = onFrameCaptured
+    }
+
+    @available(macOS 14.4, *)
+    func startCapturing() throws {
+        // get available displays without using SCShareableContent.excludingDesktopWindows
+        // to avoid a crash happening on Sonoma
+        SCShareableContent.getCurrentProcessShareableContent { content, error in
+            // if no displays, return
+            guard let displays = content?.displays else {
+                return
+            }
+
+            guard
+                let display = displays.first(where: {
+                    $0.displayID == self.config.displayId
+                })
+            else {
+                return
+            }
+
+            let filter = SCContentFilter(
+                display: display, excludingApplications: [], exceptingWindows: [])
+
+            let streamConfig = SCStreamConfiguration()
+            streamConfig.width = Int(self.config.width)
+            streamConfig.height = Int(self.config.height)
+            streamConfig.pixelFormat = kCVPixelFormatType_32BGRA
+            streamConfig.minimumFrameInterval = CMTime(
+                value: 1, timescale: self.config.frameRate)
+            streamConfig.sourceRect = CGRect(
+                x: Int(self.config.x), y: Int(self.config.y),
+                width: Int(self.config.width), height: Int(self.config.height))
+
+            let stream = SCStream(filter: filter, configuration: streamConfig, delegate: nil)
+            self.stream = stream
+
+            do {
+                try stream.addStreamOutput(
+                    self, type: .screen,
+                    sampleHandlerQueue: DispatchQueue.global(qos: .userInteractive)
+                )
+
+                stream.startCapture()
+            } catch {
+                return
+            }
+        }
+    }
+
+    func stopCapturing() async throws {
+        guard let stream = stream else {
+            return
+        }
+
+        try await stream.stopCapture()
+    }
+
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        guard let pixelBuffer = sampleBuffer.imageBuffer else {
+            return
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            return
+        }
+
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let expectedBytesPerRow = config.width * 4
+
+        frameBuffer.removeAll(keepingCapacity: true)
+
+        for row in 0..<config.height {
+            let rowStart = baseAddress.advanced(by: row * bytesPerRow)
+            frameBuffer.append(Data(bytes: rowStart, count: expectedBytesPerRow))
+        }
+
+        onFrameCaptured(frameBuffer)
+    }
+}
+
 @available(macOS 12.3, *)
 class ScreenCapturer: NSObject, SCStreamOutput {
     private let config: ScreenCapturerConfig
@@ -68,9 +170,11 @@ class ScreenCapturer: NSObject, SCStreamOutput {
                     false,
                     onScreenWindowsOnly: true)
 
-            guard let display = shareableContent.displays.first(where: {
-                $0.displayID == config.displayId
-            }) else {
+            guard
+                let display = shareableContent.displays.first(where: {
+                    $0.displayID == config.displayId
+                })
+            else {
                 throw CaptureError.noDisplaysFound
             }
 

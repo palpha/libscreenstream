@@ -29,9 +29,9 @@ enum CaptureError: Int32, Error {
     case unknownError = 99
 }
 
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 @MainActor
-var globalCapturer: ScreenCapturer?
+var globalCapturer: ScreenCapturer2?
 
 @MainActor
 var captureStatus: CaptureError = .success
@@ -39,22 +39,19 @@ var captureStatus: CaptureError = .success
 @MainActor
 var capturePermissionGranted: Bool = false
 
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 public func checkCapturePermission() async {
-    do {
-        _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        await MainActor.run {
-            capturePermissionGranted = true
-        }
-    } catch {
-        await MainActor.run {
-            capturePermissionGranted = false
+    SCShareableContent.getCurrentProcessShareableContent { content, error in
+        if error == nil {
+            Task { @MainActor in
+                capturePermissionGranted = true
+            }
         }
     }
 }
 
 @MainActor
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 @_cdecl("CheckCapturePermission")
 public func CheckCapturePermission() -> Void {
     Task {
@@ -63,14 +60,14 @@ public func CheckCapturePermission() -> Void {
 }
 
 @MainActor
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 @_cdecl("IsCapturePermissionGranted")
 public func IsCapturePermissionGranted() -> Bool {
     return capturePermissionGranted
 }
 
 @MainActor
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 @_cdecl("StartCapture")
 public func StartCapture(
     displayId: Int32,
@@ -89,7 +86,7 @@ public func StartCapture(
         frameRate: frameRate
     )
 
-    let capturer = ScreenCapturer(config: config) { frameData in
+    let capturer = ScreenCapturer2(config: config) { frameData in
         frameData.withUnsafeBytes { bufferPointer in
             guard let baseAddress = bufferPointer.baseAddress else { return }
             callback(baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
@@ -102,7 +99,7 @@ public func StartCapture(
     // Fire off the actual capture asynchronously:
     Task {
         do {
-            try await capturer.startCapturing()
+            try capturer.startCapturing()
         } catch let error as CaptureError {
             captureStatus = error
         } catch {
@@ -116,7 +113,7 @@ public func StartCapture(
 }
 
 @MainActor
-@available(macOS 12.3, *)
+@available(macOS 14.4, *)
 @_cdecl("StopCapture")
 public func StopCapture() -> Int32 {
     let localCapturer = globalCapturer
