@@ -56,7 +56,7 @@ public func checkCapturePermission() async {
 @MainActor
 @available(macOS 12.3, *)
 @_cdecl("CheckCapturePermission")
-public func CheckCapturePermission() -> Void {
+public func CheckCapturePermission() {
     Task {
         await checkCapturePermission()
     }
@@ -79,22 +79,35 @@ public func StartCapture(
     width: Int32,
     height: Int32,
     frameRate: Int32,
-    callback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void
+    fullScreenFrameRate: Int32,
+    regionCallback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void,
+    fullScreenCallback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void
 ) -> Int32 {
     // Build config
     let config = ScreenCapturerConfig(
         displayId: displayId,
         x: x, y: y,
         width: width, height: height,
-        frameRate: frameRate
+        frameRate: frameRate,
+        fullScreenFrameRate: fullScreenFrameRate
     )
 
-    let capturer = ScreenCapturer(config: config) { frameData in
-        frameData.withUnsafeBytes { bufferPointer in
-            guard let baseAddress = bufferPointer.baseAddress else { return }
-            callback(baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
-        }
-    }
+    let capturer = ScreenCapturer(
+        config: config,
+        onFrameCaptured: { frameData in
+            frameData.withUnsafeBytes { bufferPointer in
+                guard let baseAddress = bufferPointer.baseAddress else { return }
+                regionCallback(
+                    baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
+            }
+        },
+        onFullScreenCaptured: { frameData in
+            frameData.withUnsafeBytes { bufferPointer in
+                guard let baseAddress = bufferPointer.baseAddress else { return }
+                fullScreenCallback(
+                    baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
+            }
+        })
 
     globalCapturer = capturer
     captureStatus = .success
