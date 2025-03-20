@@ -147,7 +147,7 @@ class CaptureOutput: NSObject, SCStreamOutput {
         self.frameRate = frameRate
         self.onFrameCaptured = onFrameCaptured
 
-        self.frameBuffer = Data(count: Int(width * height * 4))
+        self.frameBuffer = Data(count: Int(width * height * 3))
     }
 
     func start() async throws {
@@ -201,24 +201,32 @@ class CaptureOutput: NSObject, SCStreamOutput {
         }
 
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        let expectedBytesPerRow = self.width * 4
 
-        frameBuffer.removeAll(keepingCapacity: true)
-
-        // We need space for height rows × expected bytes per row
+        // We'll produce 3 bytes per pixel in the final buffer.
+        let expectedBytesPerRow = self.width * 3
         let totalBytes = self.height * expectedBytesPerRow
+
+        // Prepare the buffer.
+        frameBuffer.removeAll(keepingCapacity: true)
         frameBuffer.count = totalBytes
 
         frameBuffer.withUnsafeMutableBytes { dstPtr in
-            // If the stride (bytesPerRow) matches expectedBytesPerRow, we can do one big copy.
-            // Otherwise, do row-by-row memcpy into the contiguous buffer.
-            if bytesPerRow == expectedBytesPerRow {
-                memcpy(dstPtr.baseAddress!, baseAddress, totalBytes)
-            } else {
-                for row in 0..<self.height {
-                    let src = baseAddress.advanced(by: row * bytesPerRow)
-                    let dst = dstPtr.baseAddress!.advanced(by: row * expectedBytesPerRow)
-                    memcpy(dst, src, expectedBytesPerRow)
+            // We'll copy row by row, skipping alpha in each pixel.
+            let dstBase = dstPtr.baseAddress!.bindMemory(to: UInt8.self, capacity: totalBytes)
+            let srcBase = baseAddress.bindMemory(to: UInt8.self, capacity: bytesPerRow * self.height)
+
+            for row in 0..<self.height {
+                let srcRow = srcBase.advanced(by: row * bytesPerRow)
+                let dstRow = dstBase.advanced(by: row * expectedBytesPerRow)
+
+                for col in 0..<self.width {
+                    // BGRA => RGB
+                    let srcIndex = col * 4
+                    let dstIndex = col * 3
+
+                    dstRow[dstIndex + 0] = srcRow[srcIndex + 2] // B -> R
+                    dstRow[dstIndex + 1] = srcRow[srcIndex + 1] // G
+                    dstRow[dstIndex + 2] = srcRow[srcIndex + 0] // R -> B
                 }
             }
         }
