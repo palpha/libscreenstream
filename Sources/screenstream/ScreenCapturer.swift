@@ -205,9 +205,22 @@ class CaptureOutput: NSObject, SCStreamOutput {
 
         frameBuffer.removeAll(keepingCapacity: true)
 
-        for row in 0..<self.height {
-            let rowStart = baseAddress.advanced(by: row * bytesPerRow)
-            frameBuffer.append(Data(bytes: rowStart, count: expectedBytesPerRow))
+        // We need space for height rows × expected bytes per row
+        let totalBytes = self.height * expectedBytesPerRow
+        frameBuffer.count = totalBytes
+
+        frameBuffer.withUnsafeMutableBytes { dstPtr in
+            // If the stride (bytesPerRow) matches expectedBytesPerRow, we can do one big copy.
+            // Otherwise, do row-by-row memcpy into the contiguous buffer.
+            if bytesPerRow == expectedBytesPerRow {
+                memcpy(dstPtr.baseAddress!, baseAddress, totalBytes)
+            } else {
+                for row in 0..<self.height {
+                    let src = baseAddress.advanced(by: row * bytesPerRow)
+                    let dst = dstPtr.baseAddress!.advanced(by: row * expectedBytesPerRow)
+                    memcpy(dst, src, expectedBytesPerRow)
+                }
+            }
         }
 
         onFrameCaptured(frameBuffer)
