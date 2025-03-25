@@ -163,6 +163,7 @@ class CaptureOutput: NSObject, SCStreamOutput {
         streamConfig.sourceRect = CGRect(
             x: x, y: y,
             width: width, height: height)
+        streamConfig.colorSpaceName = CGColorSpace.sRGB
 
         let stream = SCStream(filter: filter, configuration: streamConfig, delegate: nil)
         self.stream = stream
