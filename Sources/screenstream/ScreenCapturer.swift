@@ -56,6 +56,10 @@ class ScreenCapturer: NSObject {
     private var regionOutput: CaptureOutput?
     private var fullScreenOutput: CaptureOutput?
 
+    // Add callbacks for stopped events
+    var onRegionStopped: ((Error?) -> Void)?
+    var onFullScreenStopped: ((Error?) -> Void)?
+
     init(
         config: ScreenCapturerConfig,
         onFrameCaptured: @escaping (Data) -> Void,
@@ -86,14 +90,16 @@ class ScreenCapturer: NSObject {
                 x: config.x, y: config.y,
                 width: config.width, height: config.height,
                 frameRate: config.frameRate,
-                onFrameCaptured: onFrameCaptured)
+                onFrameCaptured: onFrameCaptured,
+                onCaptureStopped: { [weak self] error in self?.onRegionStopped?(error) })
 
             let fullScreenOutput = CaptureOutput(
                 display: display,
                 x: 0, y: 0,
                 width: display.width, height: display.height,
                 frameRate: 1,
-                onFrameCaptured: onFullScreenCaptured)
+                onFrameCaptured: onFullScreenCaptured,
+                onCaptureStopped: { [weak self] error in self?.onFullScreenStopped?(error) })
 
             try await regionOutput.start()
             try await fullScreenOutput.start()
@@ -120,7 +126,7 @@ class ScreenCapturer: NSObject {
 }
 
 @available(macOS 12.3, *)
-class CaptureOutput: NSObject, SCStreamOutput {
+class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     private let display: SCDisplay
     private let x: Int
     private let y: Int
@@ -128,6 +134,7 @@ class CaptureOutput: NSObject, SCStreamOutput {
     private let height: Int
     private let frameRate: Int32
     private let onFrameCaptured: (Data) -> Void
+    private let onCaptureStopped: ((Error?) -> Void)?
 
     private var frameBuffer: Data
     private var stream: SCStream?
@@ -137,7 +144,8 @@ class CaptureOutput: NSObject, SCStreamOutput {
         x: Int, y: Int,
         width: Int, height: Int,
         frameRate: Int32,
-        onFrameCaptured: @escaping (Data) -> Void
+        onFrameCaptured: @escaping (Data) -> Void,
+        onCaptureStopped: ((Error?) -> Void)? = nil
     ) {
         self.display = display
         self.x = x
@@ -146,11 +154,16 @@ class CaptureOutput: NSObject, SCStreamOutput {
         self.height = height
         self.frameRate = frameRate
         self.onFrameCaptured = onFrameCaptured
+        self.onCaptureStopped = onCaptureStopped
 
         self.frameBuffer = Data(count: Int(width * height * 3))
     }
 
     func start() async throws {
+        #if DEBUG
+        print("Starting capture for display \(display.displayID) at \(x),\(y) with size \(width)x\(height) at \(frameRate) FPS")
+        #endif
+
         let filter = SCContentFilter(
             display: display, excludingApplications: [], exceptingWindows: [])
 
@@ -165,7 +178,7 @@ class CaptureOutput: NSObject, SCStreamOutput {
             width: width, height: height)
         streamConfig.colorSpaceName = CGColorSpace.sRGB
 
-        let stream = SCStream(filter: filter, configuration: streamConfig, delegate: nil)
+        let stream = SCStream(filter: filter, configuration: streamConfig, delegate: self)
         self.stream = stream
 
         try stream.addStreamOutput(
@@ -183,6 +196,15 @@ class CaptureOutput: NSObject, SCStreamOutput {
         }
 
         try await stream.stopCapture()
+    }
+
+    // SCStreamDelegate method
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        #if DEBUG
+        print("Capture stopped with error: \(error.localizedDescription)")
+        #endif
+
+        onCaptureStopped?(error)
     }
 
     func stream(
@@ -233,5 +255,11 @@ class CaptureOutput: NSObject, SCStreamOutput {
         }
 
         onFrameCaptured(frameBuffer)
+    }
+
+    deinit {
+        #if DEBUG
+        print("CaptureOutput deinitialized")
+        #endif
     }
 }

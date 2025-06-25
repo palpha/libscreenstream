@@ -69,8 +69,38 @@ public func IsCapturePermissionGranted() -> Bool {
     return capturePermissionGranted
 }
 
-@MainActor
+// C struct for error interop
+//
+// NOTE: This struct must be public because it is used in a public API.
+// The callback type uses UnsafeRawPointer? for Swift/C compatibility.
+public struct ScreenStreamError {
+    public var code: Int32
+    public var domain: UnsafePointer<CChar>?
+    public var description: UnsafePointer<CChar>?
+}
+
+// Use UnsafeRawPointer? for C interop; cast to ScreenStreamError* in C/.NET
+public typealias ScreenStreamErrorCallback = @convention(c) (UnsafeRawPointer?) -> Void
+
+// Helper to create and call the error callback with NSError support
+func callErrorCallback(_ callback: ScreenStreamErrorCallback?, error: Error?) {
+    guard let callback = callback else { return }
+    if let error = error {
+        let nsError = error as NSError
+        let code: Int32 = Int32(nsError.code)
+        let domainCString = strdup(nsError.domain)
+        let descCString = strdup(nsError.localizedDescription)
+        var errStruct = ScreenStreamError(code: code, domain: domainCString, description: descCString)
+        withUnsafePointer(to: &errStruct) { ptr in
+            callback(UnsafeRawPointer(ptr))
+        }
+    } else {
+        callback(nil)
+    }
+}
+
 @available(macOS 12.3, *)
+@MainActor
 @_cdecl("StartCapture")
 public func StartCapture(
     displayId: Int32,
@@ -81,7 +111,9 @@ public func StartCapture(
     frameRate: Int32,
     fullScreenFrameRate: Int32,
     regionCallback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void,
-    fullScreenCallback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void
+    fullScreenCallback: @convention(c) (UnsafePointer<UInt8>, Int32) -> Void,
+    regionStoppedCallback: ScreenStreamErrorCallback? = nil,
+    fullScreenStoppedCallback: ScreenStreamErrorCallback? = nil
 ) -> Int32 {
     // Build config
     let config = ScreenCapturerConfig(
@@ -108,6 +140,18 @@ public func StartCapture(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
         })
+
+    // Set up stopped callbacks for C interop
+    if let regionStoppedCallback = regionStoppedCallback {
+        capturer.onRegionStopped = { error in
+            callErrorCallback(regionStoppedCallback, error: error)
+        }
+    }
+    if let fullScreenStoppedCallback = fullScreenStoppedCallback {
+        capturer.onFullScreenStopped = { error in
+            callErrorCallback(fullScreenStoppedCallback, error: error)
+        }
+    }
 
     globalCapturer = capturer
     captureStatus = .success
