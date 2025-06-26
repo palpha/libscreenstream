@@ -88,11 +88,18 @@ func callErrorCallback(_ callback: ScreenStreamErrorCallback?, error: Error?) {
     if let error = error {
         let nsError = error as NSError
         let code: Int32 = Int32(nsError.code)
-        let domainCString = strdup(nsError.domain)
-        let descCString = strdup(nsError.localizedDescription)
-        var errStruct = ScreenStreamError(code: code, domain: domainCString, description: descCString)
-        withUnsafePointer(to: &errStruct) { ptr in
-            callback(UnsafeRawPointer(ptr))
+
+        // Use safe string conversion that doesn't require manual memory management
+        let domain = nsError.domain
+        let description = nsError.localizedDescription
+
+        domain.withCString { domainPtr in
+            description.withCString { descPtr in
+                var errStruct = ScreenStreamError(code: code, domain: domainPtr, description: descPtr)
+                withUnsafePointer(to: &errStruct) { ptr in
+                    callback(UnsafeRawPointer(ptr))
+                }
+            }
         }
     } else {
         callback(nil)
@@ -115,6 +122,14 @@ public func StartCapture(
     regionStoppedCallback: ScreenStreamErrorCallback? = nil,
     fullScreenStoppedCallback: ScreenStreamErrorCallback? = nil
 ) -> Int32 {
+    // Validate input parameters to prevent crashes
+    guard displayId >= 0,
+          x >= 0, y >= 0,
+          width > 0, height > 0,
+          frameRate > 0, fullScreenFrameRate > 0 else {
+        return CaptureError.initializationFailed.rawValue
+    }
+
     // Build config
     let config = ScreenCapturerConfig(
         displayId: displayId,
@@ -126,15 +141,19 @@ public func StartCapture(
 
     let capturer = ScreenCapturer(
         config: config,
-        onFrameCaptured: { frameData in
-            frameData.withUnsafeBytes { bufferPointer in
+        onFrameCaptured: { @Sendable frameData in
+            // Copy data to ensure it remains valid for the callback duration
+            let dataCopy = Data(frameData)
+            dataCopy.withUnsafeBytes { bufferPointer in
                 guard let baseAddress = bufferPointer.baseAddress else { return }
                 regionCallback(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
         },
-        onFullScreenCaptured: { frameData in
-            frameData.withUnsafeBytes { bufferPointer in
+        onFullScreenCaptured: { @Sendable frameData in
+            // Copy data to ensure it remains valid for the callback duration
+            let dataCopy = Data(frameData)
+            dataCopy.withUnsafeBytes { bufferPointer in
                 guard let baseAddress = bufferPointer.baseAddress else { return }
                 fullScreenCallback(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
@@ -143,12 +162,12 @@ public func StartCapture(
 
     // Set up stopped callbacks for C interop
     if let regionStoppedCallback = regionStoppedCallback {
-        capturer.onRegionStopped = { error in
+        capturer.onRegionStopped = { @Sendable error in
             callErrorCallback(regionStoppedCallback, error: error)
         }
     }
     if let fullScreenStoppedCallback = fullScreenStoppedCallback {
-        capturer.onFullScreenStopped = { error in
+        capturer.onFullScreenStopped = { @Sendable error in
             callErrorCallback(fullScreenStoppedCallback, error: error)
         }
     }
@@ -156,40 +175,47 @@ public func StartCapture(
     globalCapturer = capturer
     captureStatus = .success
 
-    // Fire off the actual capture asynchronously:
+    // Start capturing asynchronously without blocking
     Task {
         do {
             try await capturer.startCapturing()
+            // Success - capturer is already set above
         } catch let error as CaptureError {
-            captureStatus = error
+            await MainActor.run {
+                captureStatus = error
+                globalCapturer = nil
+            }
         } catch {
-            captureStatus = .unknownError
+            await MainActor.run {
+                captureStatus = .unknownError
+                globalCapturer = nil
+            }
         }
     }
 
-    // The immediate return from this function indicates only that we *started* capture.
-    // Return success or any initialization error you want:
+    // Return success immediately since we started the async operation
     return CaptureError.success.rawValue
 }
 
-@MainActor
 @available(macOS 12.3, *)
+@MainActor
 @_cdecl("StopCapture")
 public func StopCapture() -> Int32 {
     let localCapturer = globalCapturer
     globalCapturer = nil
 
+    // Start async stop, but return immediately to avoid deadlock
     Task {
         do {
             try await localCapturer?.stopCapturing()
+            // Optionally update captureStatus here if needed
         } catch {
-            // If needed, hop back onto main actor to set status
-            Task { @MainActor in
+            await MainActor.run {
                 captureStatus = .unknownError
             }
         }
     }
-
+    // Return current status immediately; stopped callbacks will notify C#
     return captureStatus.rawValue
 }
 

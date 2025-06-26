@@ -19,7 +19,7 @@
 */
 
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
 struct ScreenCapturerConfig {
     let displayId: Int
@@ -50,26 +50,27 @@ struct ScreenCapturerConfig {
 @available(macOS 12.3, *)
 class ScreenCapturer: NSObject {
     private let config: ScreenCapturerConfig
-    private let onFrameCaptured: (Data) -> Void
-    private let onFullScreenCaptured: (Data) -> Void
+    private let onFrameCaptured: @Sendable (Data) -> Void
+    private let onFullScreenCaptured: @Sendable (Data) -> Void
 
     private var regionOutput: CaptureOutput?
     private var fullScreenOutput: CaptureOutput?
 
     // Add callbacks for stopped events
-    var onRegionStopped: ((Error?) -> Void)?
-    var onFullScreenStopped: ((Error?) -> Void)?
+    var onRegionStopped: (@Sendable (Error?) -> Void)?
+    var onFullScreenStopped: (@Sendable (Error?) -> Void)?
 
     init(
         config: ScreenCapturerConfig,
-        onFrameCaptured: @escaping (Data) -> Void,
-        onFullScreenCaptured: @escaping (Data) -> Void
+        onFrameCaptured: @escaping @Sendable (Data) -> Void,
+        onFullScreenCaptured: @escaping @Sendable (Data) -> Void
     ) {
         self.config = config
         self.onFrameCaptured = onFrameCaptured
         self.onFullScreenCaptured = onFullScreenCaptured
     }
 
+    @MainActor
     func startCapturing() async throws {
         do {
             let shareableContent =
@@ -85,13 +86,16 @@ class ScreenCapturer: NSObject {
                 throw CaptureError.noDisplaysFound
             }
 
+            let regionStoppedCallback = self.onRegionStopped
+            let fullScreenStoppedCallback = self.onFullScreenStopped
+
             let regionOutput = CaptureOutput(
                 display: display,
                 x: config.x, y: config.y,
                 width: config.width, height: config.height,
                 frameRate: config.frameRate,
                 onFrameCaptured: onFrameCaptured,
-                onCaptureStopped: { [weak self] error in self?.onRegionStopped?(error) })
+                onCaptureStopped: { @Sendable error in regionStoppedCallback?(error) })
 
             let fullScreenOutput = CaptureOutput(
                 display: display,
@@ -99,7 +103,7 @@ class ScreenCapturer: NSObject {
                 width: display.width, height: display.height,
                 frameRate: 1,
                 onFrameCaptured: onFullScreenCaptured,
-                onCaptureStopped: { [weak self] error in self?.onFullScreenStopped?(error) })
+                onCaptureStopped: { @Sendable error in fullScreenStoppedCallback?(error) })
 
             try await regionOutput.start()
             try await fullScreenOutput.start()
@@ -113,12 +117,13 @@ class ScreenCapturer: NSObject {
         }
     }
 
+    @MainActor
     func stopCapturing() async throws {
-        if let regionOutput = regionOutput {
+        if let regionOutput = self.regionOutput {
             try await regionOutput.stop()
             self.regionOutput = nil
         }
-        if let fullScreenOutput = fullScreenOutput {
+        if let fullScreenOutput = self.fullScreenOutput {
             try await fullScreenOutput.stop()
             self.fullScreenOutput = nil
         }
@@ -133,8 +138,8 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     private let width: Int
     private let height: Int
     private let frameRate: Int32
-    private let onFrameCaptured: (Data) -> Void
-    private let onCaptureStopped: ((Error?) -> Void)?
+    private let onFrameCaptured: @Sendable (Data) -> Void
+    private let onCaptureStopped: (@Sendable (Error?) -> Void)?
 
     private var frameBuffer: Data
     private var stream: SCStream?
@@ -144,8 +149,8 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         x: Int, y: Int,
         width: Int, height: Int,
         frameRate: Int32,
-        onFrameCaptured: @escaping (Data) -> Void,
-        onCaptureStopped: ((Error?) -> Void)? = nil
+        onFrameCaptured: @escaping @Sendable (Data) -> Void,
+        onCaptureStopped: (@Sendable (Error?) -> Void)? = nil
     ) {
         self.display = display
         self.x = x
@@ -159,6 +164,7 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         self.frameBuffer = Data(count: Int(width * height * 3))
     }
 
+    @MainActor
     func start() async throws {
         #if DEBUG
         print("Starting capture for display \(display.displayID) at \(x),\(y) with size \(width)x\(height) at \(frameRate) FPS")
@@ -190,21 +196,27 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         try await stream.startCapture()
     }
 
+    @MainActor
     func stop() async throws {
         guard let stream = stream else {
             return
         }
 
         try await stream.stopCapture()
+
+        // Always call the stop callback for normal stops too, not just errors
+        if let onCaptureStopped = self.onCaptureStopped {
+            onCaptureStopped(nil) // nil indicates normal stop
+        }
     }
 
     // SCStreamDelegate method
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        #if DEBUG
-        print("Capture stopped with error: \(error.localizedDescription)")
-        #endif
-
-        onCaptureStopped?(error)
+        if let onCaptureStopped = self.onCaptureStopped {
+            Task { @MainActor in
+                onCaptureStopped(error)
+            }
+        }
     }
 
     func stream(
@@ -224,29 +236,22 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let width = self.width
+        let height = self.height
+        let expectedBytesPerRow = width * 3
+        let totalBytes = height * expectedBytesPerRow
 
-        // We'll produce 3 bytes per pixel in the final buffer.
-        let expectedBytesPerRow = self.width * 3
-        let totalBytes = self.height * expectedBytesPerRow
-
-        // Prepare the buffer.
-        frameBuffer.removeAll(keepingCapacity: true)
-        frameBuffer.count = totalBytes
-
-        frameBuffer.withUnsafeMutableBytes { dstPtr in
-            // We'll copy row by row, skipping alpha in each pixel.
+        // Process pixel buffer synchronously
+        var frameData = Data(count: totalBytes)
+        frameData.withUnsafeMutableBytes { dstPtr in
             let dstBase = dstPtr.baseAddress!.bindMemory(to: UInt8.self, capacity: totalBytes)
-            let srcBase = baseAddress.bindMemory(to: UInt8.self, capacity: bytesPerRow * self.height)
-
-            for row in 0..<self.height {
+            let srcBase = baseAddress.bindMemory(to: UInt8.self, capacity: bytesPerRow * height)
+            for row in 0..<height {
                 let srcRow = srcBase.advanced(by: row * bytesPerRow)
                 let dstRow = dstBase.advanced(by: row * expectedBytesPerRow)
-
-                for col in 0..<self.width {
-                    // BGRA => RGB
+                for col in 0..<width {
                     let srcIndex = col * 4
                     let dstIndex = col * 3
-
                     dstRow[dstIndex + 0] = srcRow[srcIndex + 2] // B -> R
                     dstRow[dstIndex + 1] = srcRow[srcIndex + 1] // G
                     dstRow[dstIndex + 2] = srcRow[srcIndex + 0] // R -> B
@@ -254,7 +259,9 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
 
-        onFrameCaptured(frameBuffer)
+        Task { @MainActor [onFrameCaptured] in
+            onFrameCaptured(frameData)
+        }
     }
 
     deinit {
