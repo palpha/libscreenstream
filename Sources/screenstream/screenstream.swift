@@ -45,8 +45,32 @@ final class BufferPool: @unchecked Sendable {
     private let queue = DispatchQueue(label: "buffer.pool", qos: .userInteractive)
     private let maxBuffersPerSize = 3  // Limit buffers per size bucket
 
+    // Performance monitoring
+    private var outstandingBuffers: Int = 0
+    private var totalBuffersCreated: Int = 0
+    private var peakOutstandingBuffers: Int = 0
+    private var lastWarningTime: CFAbsoluteTime = 0
+
+    private func shouldWarnAboutPressure() -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - lastWarningTime > 5.0 { // Warn at most every 5 seconds
+            lastWarningTime = now
+            return true
+        }
+        return false
+    }
+
     func getBuffer(size: Int) -> Data {
         return queue.sync {
+            outstandingBuffers += 1
+            peakOutstandingBuffers = max(peakOutstandingBuffers, outstandingBuffers)
+
+            // Warn if we have too many outstanding buffers (indicates consumer can't keep up)
+            if outstandingBuffers > 10 && shouldWarnAboutPressure() {
+                print("WARNING: \(outstandingBuffers) outstanding buffers - consuming code's processing may be too slow")
+                print("Peak: \(peakOutstandingBuffers), Total created: \(totalBuffersCreated)")
+            }
+
             // Try exact size match first
             if var buffers = availableBuffers[size], !buffers.isEmpty {
                 let buffer = buffers.removeLast()
@@ -70,12 +94,14 @@ final class BufferPool: @unchecked Sendable {
             }
 
             // Create new buffer if no reusable one found
+            totalBuffersCreated += 1
             return Data(count: size)
         }
     }
 
     func returnBuffer(_ buffer: Data) {
         queue.sync {
+            outstandingBuffers -= 1
             let size = buffer.count
             var buffers = availableBuffers[size] ?? []
 
@@ -86,10 +112,67 @@ final class BufferPool: @unchecked Sendable {
             }
         }
     }
+
+    func getStats() -> (outstanding: Int, peak: Int, totalCreated: Int) {
+        return queue.sync {
+            return (outstandingBuffers, peakOutstandingBuffers, totalBuffersCreated)
+        }
+    }
+
+    func resetStats() {
+        queue.sync {
+            peakOutstandingBuffers = outstandingBuffers
+            totalBuffersCreated = 0
+        }
+    }
 }
 
 let regionBufferPool = BufferPool()
 let fullScreenBufferPool = BufferPool()
+
+// Frame dropping logic
+final class FrameDropper: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "frame.dropper", qos: .userInteractive)
+    private var lastFrameTime: CFAbsoluteTime = 0
+    private var droppedFrameCount: Int = 0
+    private var totalFrameCount: Int = 0
+
+    func shouldDropFrame(bufferPool: BufferPool) -> Bool {
+        return queue.sync {
+            totalFrameCount += 1
+            let now = CFAbsoluteTimeGetCurrent()
+            let timeSinceLastFrame = now - lastFrameTime
+            lastFrameTime = now
+
+            let stats = bufferPool.getStats()
+
+            // Drop frames if:
+            // 1. Too many outstanding buffers (indicates consumer can't keep up)
+            // 2. Frame rate is too high (less than 16ms between frames = >60 FPS)
+            let shouldDrop = stats.outstanding > 15 || (timeSinceLastFrame < 0.016 && stats.outstanding > 5)
+
+            if shouldDrop {
+                droppedFrameCount += 1
+                if droppedFrameCount % 10 == 0 { // Log every 10th dropped frame
+                    let dropRate = Double(droppedFrameCount) / Double(totalFrameCount) * 100
+                    print("Frame dropping: \(droppedFrameCount)/\(totalFrameCount) (\(String(format: "%.1f", dropRate))%) - Outstanding buffers: \(stats.outstanding)")
+                }
+            }
+
+            return shouldDrop
+        }
+    }
+
+    func getStats() -> (dropped: Int, total: Int, dropRate: Double) {
+        return queue.sync {
+            let rate = totalFrameCount > 0 ? Double(droppedFrameCount) / Double(totalFrameCount) * 100 : 0
+            return (droppedFrameCount, totalFrameCount, rate)
+        }
+    }
+}
+
+let regionFrameDropper = FrameDropper()
+let fullScreenFrameDropper = FrameDropper()
 
 @available(macOS 12.3, *)
 public func checkCapturePermission() async {
@@ -200,6 +283,11 @@ public func StartCapture(
     let capturer = ScreenCapturer(
         config: config,
         onFrameCaptured: { @Sendable frameData in
+            // Check if we should drop this frame due to performance issues
+            if regionFrameDropper.shouldDropFrame(bufferPool: regionBufferPool) {
+                return // Drop the frame
+            }
+
             // Get a reusable buffer from the pool
             var buffer = regionBufferPool.getBuffer(size: frameData.count)
 
@@ -224,6 +312,11 @@ public func StartCapture(
             regionBufferPool.returnBuffer(buffer)
         },
         onFullScreenCaptured: { @Sendable frameData in
+            // Check if we should drop this frame due to performance issues
+            if fullScreenFrameDropper.shouldDropFrame(bufferPool: fullScreenBufferPool) {
+                return // Drop the frame
+            }
+
             // Get a reusable buffer from the pool
             var buffer = fullScreenBufferPool.getBuffer(size: frameData.count)
 
@@ -311,4 +404,34 @@ public func StopCapture() -> Int32 {
 @_cdecl("GetCaptureStatus")
 public func GetCaptureStatus() -> Int32 {
     return captureStatus.rawValue
+}
+
+@_cdecl("GetRegionBufferStats")
+public func GetRegionBufferStats() -> Int32 {
+    let stats = regionBufferPool.getStats()
+    return Int32(stats.outstanding)
+}
+
+@_cdecl("GetFullScreenBufferStats")
+public func GetFullScreenBufferStats() -> Int32 {
+    let stats = fullScreenBufferPool.getStats()
+    return Int32(stats.outstanding)
+}
+
+@_cdecl("GetRegionFrameDropStats")
+public func GetRegionFrameDropStats() -> Int32 {
+    let stats = regionFrameDropper.getStats()
+    return Int32(stats.dropRate * 100) // Return drop rate as percentage * 100
+}
+
+@_cdecl("GetFullScreenFrameDropStats")
+public func GetFullScreenFrameDropStats() -> Int32 {
+    let stats = fullScreenFrameDropper.getStats()
+    return Int32(stats.dropRate * 100) // Return drop rate as percentage * 100
+}
+
+@_cdecl("ResetPerformanceStats")
+public func ResetPerformanceStats() {
+    regionBufferPool.resetStats()
+    fullScreenBufferPool.resetStats()
 }
