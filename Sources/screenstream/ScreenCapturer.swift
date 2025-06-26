@@ -259,9 +259,8 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
 
-        Task { @MainActor [onFrameCaptured] in
-            onFrameCaptured(frameData)
-        }
+        // Call the callback directly since onFrameCaptured is already @Sendable
+        onFrameCaptured(frameData)
     }
 
     deinit {

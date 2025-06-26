@@ -39,6 +39,58 @@ var captureStatus: CaptureError = .success
 @MainActor
 var capturePermissionGranted: Bool = false
 
+// Buffer pool for frame data reuse
+final class BufferPool: @unchecked Sendable {
+    private var availableBuffers: [Int: [Data]] = [:]  // Size -> [Buffers]
+    private let queue = DispatchQueue(label: "buffer.pool", qos: .userInteractive)
+    private let maxBuffersPerSize = 3  // Limit buffers per size bucket
+
+    func getBuffer(size: Int) -> Data {
+        return queue.sync {
+            // Try exact size match first
+            if var buffers = availableBuffers[size], !buffers.isEmpty {
+                let buffer = buffers.removeLast()
+                availableBuffers[size] = buffers.isEmpty ? nil : buffers
+                return buffer
+            }
+
+            // Try larger buffers (within reason - max 25% larger)
+            let maxAcceptableSize = size + (size / 4)
+            for candidateSize in (size + 1)...maxAcceptableSize {
+                if var buffers = availableBuffers[candidateSize], !buffers.isEmpty {
+                    let buffer = buffers.removeLast()
+                    availableBuffers[candidateSize] = buffers.isEmpty ? nil : buffers
+                    // Resize the buffer in-place if possible, or return as-is if close enough
+                    if buffer.count - size <= size / 10 {  // Within 10% is close enough
+                        return buffer
+                    } else {
+                        return Data(buffer.prefix(size))
+                    }
+                }
+            }
+
+            // Create new buffer if no reusable one found
+            return Data(count: size)
+        }
+    }
+
+    func returnBuffer(_ buffer: Data) {
+        queue.sync {
+            let size = buffer.count
+            var buffers = availableBuffers[size] ?? []
+
+            // Only keep if we haven't hit the limit for this size
+            if buffers.count < maxBuffersPerSize {
+                buffers.append(buffer)
+                availableBuffers[size] = buffers
+            }
+        }
+    }
+}
+
+let regionBufferPool = BufferPool()
+let fullScreenBufferPool = BufferPool()
+
 @available(macOS 12.3, *)
 public func checkCapturePermission() async {
     do {
@@ -90,12 +142,18 @@ func callErrorCallback(_ callback: ScreenStreamErrorCallback?, error: Error?) {
         let code: Int32 = Int32(nsError.code)
 
         // Use safe string conversion that doesn't require manual memory management
+        // Avoid string copying by using the original NSString backing storage
         let domain = nsError.domain
         let description = nsError.localizedDescription
 
-        domain.withCString { domainPtr in
-            description.withCString { descPtr in
-                var errStruct = ScreenStreamError(code: code, domain: domainPtr, description: descPtr)
+        // Use withCString to avoid string allocation/copying
+        domain.utf8CString.withUnsafeBufferPointer { domainBuffer in
+            description.utf8CString.withUnsafeBufferPointer { descBuffer in
+                var errStruct = ScreenStreamError(
+                    code: code,
+                    domain: domainBuffer.baseAddress,
+                    description: descBuffer.baseAddress
+                )
                 withUnsafePointer(to: &errStruct) { ptr in
                     callback(UnsafeRawPointer(ptr))
                 }
@@ -142,22 +200,52 @@ public func StartCapture(
     let capturer = ScreenCapturer(
         config: config,
         onFrameCaptured: { @Sendable frameData in
-            // Copy data to ensure it remains valid for the callback duration
-            let dataCopy = Data(frameData)
-            dataCopy.withUnsafeBytes { bufferPointer in
-                guard let baseAddress = bufferPointer.baseAddress else { return }
+            // Get a reusable buffer from the pool
+            var buffer = regionBufferPool.getBuffer(size: frameData.count)
+
+            // Copy the frame data to our managed buffer
+            buffer.withUnsafeMutableBytes { bufferPtr in
+                frameData.withUnsafeBytes { dataPtr in
+                    bufferPtr.copyMemory(from: dataPtr)
+                }
+            }
+
+            // Call the C callback with our managed buffer
+            buffer.withUnsafeBytes { bufferPointer in
+                guard let baseAddress = bufferPointer.baseAddress else {
+                    regionBufferPool.returnBuffer(buffer)
+                    return
+                }
                 regionCallback(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
+
+            // Return buffer to pool for reuse
+            regionBufferPool.returnBuffer(buffer)
         },
         onFullScreenCaptured: { @Sendable frameData in
-            // Copy data to ensure it remains valid for the callback duration
-            let dataCopy = Data(frameData)
-            dataCopy.withUnsafeBytes { bufferPointer in
-                guard let baseAddress = bufferPointer.baseAddress else { return }
+            // Get a reusable buffer from the pool
+            var buffer = fullScreenBufferPool.getBuffer(size: frameData.count)
+
+            // Copy the frame data to our managed buffer
+            buffer.withUnsafeMutableBytes { bufferPtr in
+                frameData.withUnsafeBytes { dataPtr in
+                    bufferPtr.copyMemory(from: dataPtr)
+                }
+            }
+
+            // Call the C callback with our managed buffer
+            buffer.withUnsafeBytes { bufferPointer in
+                guard let baseAddress = bufferPointer.baseAddress else {
+                    fullScreenBufferPool.returnBuffer(buffer)
+                    return
+                }
                 fullScreenCallback(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
+
+            // Return buffer to pool for reuse
+            fullScreenBufferPool.returnBuffer(buffer)
         })
 
     // Set up stopped callbacks for C interop
