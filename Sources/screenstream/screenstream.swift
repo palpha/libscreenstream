@@ -446,6 +446,8 @@ public struct ScreenStreamWindowInfo {
     public var applicationName: UnsafePointer<CChar>?
     public var thumbnail: UnsafePointer<UInt8>?
     public var thumbnailLength: Int32
+    public var width: Int32
+    public var height: Int32
 }
 
 public struct ScreenStreamApplicationInfo {
@@ -479,8 +481,23 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                     title: UnsafePointer(titleCString),
                     applicationName: UnsafePointer(appNameCString),
                     thumbnail: thumbPtr,
-                    thumbnailLength: Int32(win.thumbnail?.count ?? 0)
+                    thumbnailLength: Int32(win.thumbnail?.count ?? 0),
+                    width: Int32(win.thumbnail != nil ? win.thumbnail!.count : 0), // fallback if not available
+                    height: 0 // fallback, update below
                 ))
+                // If win has width/height properties, set them here
+                if infos.count > 0 {
+                    var last = infos[infos.count - 1]
+                    if let w = win as? (width: Int, height: Int) {
+                        last.width = Int32(w.width)
+                        last.height = Int32(w.height)
+                        infos[infos.count - 1] = last
+                    } else if let width = win.width as? Int, let height = win.height as? Int {
+                        last.width = Int32(width)
+                        last.height = Int32(height)
+                        infos[infos.count - 1] = last
+                    }
+                }
             }
             infos.withUnsafeBytes { infoBytes in
                 // Reconstruct the callback from the address

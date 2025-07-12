@@ -61,6 +61,8 @@ struct WindowInfo {
     let processId: Int
     let applicationName: String
     let thumbnail: Data?
+    let width: Int
+    let height: Int
 }
 
 @available(macOS 12.3, *)
@@ -308,7 +310,9 @@ extension ScreenCapturer {
                 windowId: Int(win.windowID),
                 processId: Int(win.owningApplication?.processID ?? 0),
                 applicationName: win.owningApplication?.applicationName ?? "",
-                thumbnail: thumbnailData
+                thumbnail: thumbnailData,
+                width: Int(win.frame.width),
+                height: Int(win.frame.height)
             )
         }
     }

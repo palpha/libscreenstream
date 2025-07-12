@@ -15,6 +15,8 @@ typedef struct {
     const char* applicationName;
     const uint8_t* thumbnail;
     int32_t thumbnailLength;
+    int32_t width;
+    int32_t height;
 } ScreenStreamWindowInfo;
 
 // Callback for window list
