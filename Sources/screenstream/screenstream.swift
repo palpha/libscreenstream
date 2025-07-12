@@ -20,6 +20,8 @@
 
 import Foundation
 import ScreenCaptureKit
+import CoreGraphics
+import AppKit
 
 enum CaptureError: Int32, Error {
     case success = 0
@@ -434,4 +436,98 @@ public func GetFullScreenFrameDropStats() -> Int32 {
 public func ResetPerformanceStats() {
     regionBufferPool.resetStats()
     fullScreenBufferPool.resetStats()
+}
+
+// MARK: - C Interop Structs
+public struct ScreenStreamWindowInfo {
+    public var windowId: Int32
+    public var processId: Int32
+    public var title: UnsafePointer<CChar>?
+    public var applicationName: UnsafePointer<CChar>?
+    public var thumbnail: UnsafePointer<UInt8>?
+    public var thumbnailLength: Int32
+}
+
+public struct ScreenStreamApplicationInfo {
+    public var processId: Int32
+    public var name: UnsafePointer<CChar>?
+    public var bundleIdentifier: UnsafePointer<CChar>?
+}
+
+@available(macOS 12.3, *)
+@_cdecl("GetAvailableWindows")
+public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
+    guard let callbackPtr = callbackPtr else { return }
+    nonisolated(unsafe) let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+    Task.detached {
+        do {
+            let windows = try await ScreenCapturer.getAvailableWindows()
+            var infos: [ScreenStreamWindowInfo] = []
+            for win in windows {
+                let titleCString = strdup(win.title)!
+                let appNameCString = strdup(win.applicationName)!
+                let thumbPtr: UnsafePointer<UInt8>? = win.thumbnail?.withUnsafeBytes { ptr in
+                    guard let base = ptr.baseAddress else { return nil }
+                    return base.assumingMemoryBound(to: UInt8.self)
+                }
+                infos.append(ScreenStreamWindowInfo(
+                    windowId: Int32(win.windowId),
+                    processId: Int32(win.processId),
+                    title: UnsafePointer(titleCString),
+                    applicationName: UnsafePointer(appNameCString),
+                    thumbnail: thumbPtr,
+                    thumbnailLength: Int32(win.thumbnail?.count ?? 0)
+                ))
+            }
+            infos.withUnsafeBytes { infoBytes in
+                callback(infoBytes.baseAddress, Int32(infos.count))
+            }
+            // NOTE: The caller must free the C strings and thumbnail buffers after use
+        } catch {
+            callback(nil, 0)
+        }
+    }
+}
+
+@available(macOS 12.3, *)
+@_cdecl("GetWindowThumbnail")
+public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) {
+    guard let callbackPtr = callbackPtr else { return }
+    let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
+    let data = ScreenCapturer.getWindowThumbnail(windowId: Int(windowId))
+    data?.withUnsafeBytes { ptr in
+        guard let base = ptr.baseAddress else {
+            callback(nil, 0)
+            return
+        }
+        callback(base.assumingMemoryBound(to: UInt8.self), Int32(ptr.count))
+    } ?? callback(nil, 0)
+}
+
+@available(macOS 12.3, *)
+@_cdecl("GetAvailableApplications")
+public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
+    guard let callbackPtr = callbackPtr else { return }
+    nonisolated(unsafe) let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+    Task.detached {
+        do {
+            let apps = try await ScreenCapturer.getAvailableApplications()
+            var infos: [ScreenStreamApplicationInfo] = []
+            for app in apps {
+                let nameCString = strdup(app.name)!
+                let bundleCString = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
+                infos.append(ScreenStreamApplicationInfo(
+                    processId: Int32(app.processId),
+                    name: UnsafePointer(nameCString),
+                    bundleIdentifier: bundleCString != nil ? UnsafePointer(bundleCString!) : nil
+                ))
+            }
+            infos.withUnsafeBytes { infoBytes in
+                callback(infoBytes.baseAddress, Int32(infos.count))
+            }
+            // NOTE: The caller must free the C strings after use
+        } catch {
+            callback(nil, 0)
+        }
+    }
 }

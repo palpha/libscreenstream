@@ -19,6 +19,8 @@
 */
 
 import Foundation
+import CoreGraphics
+import AppKit
 @preconcurrency import ScreenCaptureKit
 
 struct ScreenCapturerConfig {
@@ -45,6 +47,20 @@ struct ScreenCapturerConfig {
         self.frameRate = Int32(frameRate)
         self.fullScreenFrameRate = Int32(fullScreenFrameRate)
     }
+}
+
+struct ApplicationInfo {
+    let name: String
+    let processId: Int
+    let bundleIdentifier: String?
+}
+
+struct WindowInfo {
+    let title: String
+    let windowId: Int
+    let processId: Int
+    let applicationName: String
+    let thumbnail: Data?
 }
 
 @available(macOS 12.3, *)
@@ -268,4 +284,59 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         print("CaptureOutput deinitialized")
         #endif
     }
+}
+
+@available(macOS 12.3, *)
+extension ScreenCapturer {
+    static func getAvailableApplications() async throws -> [ApplicationInfo] {
+        let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        return shareableContent.applications.map { app in
+            ApplicationInfo(
+                name: app.applicationName,
+                processId: Int(app.processID),
+                bundleIdentifier: app.bundleIdentifier
+            )
+        }
+    }
+
+    static func getAvailableWindows() async throws -> [WindowInfo] {
+        let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        return shareableContent.windows.map { win in
+            let thumbnailData = getWindowThumbnail(windowId: Int(win.windowID))
+            return WindowInfo(
+                title: win.title ?? "",
+                windowId: Int(win.windowID),
+                processId: Int(win.owningApplication?.processID ?? 0),
+                applicationName: win.owningApplication?.applicationName ?? "",
+                thumbnail: thumbnailData
+            )
+        }
+    }
+
+    static func getWindowThumbnail(windowId: Int) -> Data? {
+        let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(windowId), [.bestResolution])
+        guard let cgImage = image else { return nil }
+        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+        return bitmapRep.representation(using: .png, properties: [:])
+    }
+}
+
+@available(macOS 12.3, *)
+class StreamOutputHandler: NSObject, SCStreamOutput {
+    private let handler: (CVPixelBuffer) -> Void
+    init(_ handler: @escaping (CVPixelBuffer) -> Void) {
+        self.handler = handler
+    }
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        handler(pixelBuffer)
+    }
+}
+
+func pixelBufferToCGImage(_ pixelBuffer: CVPixelBuffer) -> CGImage? {
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    let context = CIContext()
+    return context.createCGImage(ciImage, from: ciImage.extent)
 }
