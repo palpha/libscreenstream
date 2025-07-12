@@ -458,10 +458,10 @@ public struct ScreenStreamApplicationInfo {
 @_cdecl("GetAvailableWindows")
 public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    
+
     // Capture the raw pointer as a sendable value using the recommended approach
     let callbackAddress = Int(bitPattern: callbackPtr)
-    
+
     Task {
         do {
             let windows = try await ScreenCapturer.getAvailableWindows()
@@ -515,10 +515,10 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
 @_cdecl("GetAvailableApplications")
 public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    
+
     // Capture the raw pointer as a sendable value
     let callbackAddress = Int(bitPattern: callbackPtr)
-    
+
     Task {
         do {
             let apps = try await ScreenCapturer.getAvailableApplications()
