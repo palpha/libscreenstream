@@ -458,8 +458,11 @@ public struct ScreenStreamApplicationInfo {
 @_cdecl("GetAvailableWindows")
 public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    nonisolated(unsafe) let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
-    Task.detached {
+    
+    // Capture the raw pointer as a sendable value using the recommended approach
+    let callbackAddress = Int(bitPattern: callbackPtr)
+    
+    Task {
         do {
             let windows = try await ScreenCapturer.getAvailableWindows()
             var infos: [ScreenStreamWindowInfo] = []
@@ -480,10 +483,14 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                 ))
             }
             infos.withUnsafeBytes { infoBytes in
+                // Reconstruct the callback from the address
+                let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
             // NOTE: The caller must free the C strings and thumbnail buffers after use
         } catch {
+            // Reconstruct the callback from the address for error case
+            let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }
@@ -508,8 +515,11 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
 @_cdecl("GetAvailableApplications")
 public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    nonisolated(unsafe) let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
-    Task.detached {
+    
+    // Capture the raw pointer as a sendable value
+    let callbackAddress = Int(bitPattern: callbackPtr)
+    
+    Task {
         do {
             let apps = try await ScreenCapturer.getAvailableApplications()
             var infos: [ScreenStreamApplicationInfo] = []
@@ -523,10 +533,14 @@ public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
                 ))
             }
             infos.withUnsafeBytes { infoBytes in
+                // Reconstruct the callback from the address
+                let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
             // NOTE: The caller must free the C strings after use
         } catch {
+            // Reconstruct the callback from the address for error case
+            let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }
