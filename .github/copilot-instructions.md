@@ -1,5 +1,6 @@
-# P/Invoke & Memory Management:
-- Always use strdup()/malloc() on Swift side for P/Invoke compatibility, never Swift Data with withUnsafeBytes
+# P/Invoke & Memory Management (Swift/C <-> .NET):
+- Swift/C side allocates strings for interop using `strdup` (system malloc).
+- Do not use Swift Data or withUnsafeBytes for interop buffers; always allocate with `strdup` for strings.
 
 # Swift 6 Concurrency:
 - Use @MainActor isolation for global state and UI-related APIs
