@@ -536,8 +536,8 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
             var infos: [ScreenStreamWindowInfo] = []
 
             for win in windows {
-                let titlePtr = strdup(win.title)
-                let appNamePtr = strdup(win.applicationName)
+                let titlePtr: UnsafePointer<CChar>? = win.title.isEmpty ? nil : UnsafePointer(strdup(win.title))
+                let appNamePtr: UnsafePointer<CChar>? = win.applicationName.isEmpty ? nil : UnsafePointer(strdup(win.applicationName))
                 infos.append(
                     ScreenStreamWindowInfo(
                         windowId: Int32(win.windowId),
