@@ -21,6 +21,9 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import Accelerate
+import ImageIO
+import UniformTypeIdentifiers
 @preconcurrency import ScreenCaptureKit
 
 struct ScreenCapturerConfig {
@@ -246,35 +249,41 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
 
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-            return
-        }
-
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        // Use modern vImage for safer and more efficient pixel format conversion
         let width = self.width
         let height = self.height
         let expectedBytesPerRow = width * 3
         let totalBytes = height * expectedBytesPerRow
 
-        // Process pixel buffer synchronously
         var frameData = Data(count: totalBytes)
-        frameData.withUnsafeMutableBytes { dstPtr in
-            let dstBase = dstPtr.baseAddress!.bindMemory(to: UInt8.self, capacity: totalBytes)
-            let srcBase = baseAddress.bindMemory(to: UInt8.self, capacity: bytesPerRow * height)
-            for row in 0..<height {
-                let srcRow = srcBase.advanced(by: row * bytesPerRow)
-                let dstRow = dstBase.advanced(by: row * expectedBytesPerRow)
-                for col in 0..<width {
-                    let srcIndex = col * 4
-                    let dstIndex = col * 3
-                    dstRow[dstIndex + 0] = srcRow[srcIndex + 2] // B -> R
-                    dstRow[dstIndex + 1] = srcRow[srcIndex + 1] // G
-                    dstRow[dstIndex + 2] = srcRow[srcIndex + 0] // R -> B
-                }
-            }
+
+        frameData.withUnsafeMutableBytes { dstBytes in
+            CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            guard let srcBaseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+
+            let srcBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+            // Source buffer (BGRA)
+            var srcBuffer = vImage_Buffer(
+                data: srcBaseAddress,
+                height: vImagePixelCount(height),
+                width: vImagePixelCount(width),
+                rowBytes: srcBytesPerRow
+            )
+
+            // Destination buffer (RGB)
+            var dstBuffer = vImage_Buffer(
+                data: dstBytes.baseAddress!,
+                height: vImagePixelCount(height),
+                width: vImagePixelCount(width),
+                rowBytes: expectedBytesPerRow
+            )
+
+            // Convert BGRA to RGB using vImage (much faster than manual loops)
+            let permuteMap: [UInt8] = [2, 1, 0] // B->R, G->G, R->B (drop A)
+            vImagePermuteChannels_ARGB8888(&srcBuffer, &dstBuffer, permuteMap, vImage_Flags(kvImageNoFlags))
         }
 
         // Call the callback directly since onFrameCaptured is already @Sendable
@@ -360,8 +369,20 @@ extension ScreenCapturer {
         guard let pixelBuffer = framePixelBuffer, let cgImage = pixelBufferToCGImage(pixelBuffer) else {
             return nil
         }
-        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
-        return bitmapRep.representation(using: .png, properties: [:])
+
+        // Use modern ImageIO for PNG encoding (more efficient than NSBitmapImageRep)
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(mutableData, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+
+        CGImageDestinationAddImage(destination, cgImage, nil)
+
+        guard CGImageDestinationFinalize(destination) else {
+            return nil
+        }
+
+        return Data(mutableData)
     }
 }
 
@@ -378,9 +399,8 @@ class StreamOutputHandler: NSObject, SCStreamOutput {
 }
 
 func pixelBufferToCGImage(_ pixelBuffer: CVPixelBuffer) -> CGImage? {
-    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+    // Use CoreImage for safer pixel buffer to CGImage conversion
     let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-    let context = CIContext()
+    let context = CIContext(options: [.workingColorSpace: CGColorSpace.sRGB as Any])
     return context.createCGImage(ciImage, from: ciImage.extent)
 }

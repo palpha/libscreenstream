@@ -22,6 +22,7 @@ import Foundation
 import ScreenCaptureKit
 import CoreGraphics
 import AppKit
+import Darwin
 
 enum CaptureError: Int32, Error {
     case success = 0
@@ -468,40 +469,45 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
         do {
             let windows = try await ScreenCapturer.getAvailableWindows()
             var infos: [ScreenStreamWindowInfo] = []
-            for win in windows {
-                let titleCString = strdup(win.title)!
-                let appNameCString = strdup(win.applicationName)!
 
-                // Copy thumbnail data to C-managed memory if it exists
-                var thumbPtr: UnsafePointer<UInt8>? = nil
-                var thumbLength: Int32 = 0
+            for win in windows {
+                // Use strdup for P/Invoke compatibility - .NET expects heap-allocated strings
+                let titlePtr = strdup(win.title)
+                let appNamePtr = strdup(win.applicationName)
+
+                // Copy thumbnail data if it exists
+                var thumbnailPtr: UnsafePointer<UInt8>? = nil
+                var thumbnailLength: Int32 = 0
                 if let thumbnail = win.thumbnail {
-                    thumbLength = Int32(thumbnail.count)
-                    let copiedData = malloc(thumbnail.count)!
+                    thumbnailLength = Int32(thumbnail.count)
+                    let allocatedThumbnail = malloc(thumbnail.count)?.assumingMemoryBound(to: UInt8.self)
                     thumbnail.withUnsafeBytes { bytes in
-                        copiedData.copyMemory(from: bytes.baseAddress!, byteCount: thumbnail.count)
+                        if let allocated = allocatedThumbnail, let source = bytes.baseAddress {
+                            memcpy(allocated, source, thumbnail.count)
+                        }
                     }
-                    thumbPtr = UnsafePointer(copiedData.assumingMemoryBound(to: UInt8.self))
+                    thumbnailPtr = UnsafePointer(allocatedThumbnail)
                 }
 
                 infos.append(ScreenStreamWindowInfo(
                     windowId: Int32(win.windowId),
                     processId: Int32(win.processId),
-                    title: UnsafePointer(titleCString),
-                    applicationName: UnsafePointer(appNameCString),
-                    thumbnail: thumbPtr,
-                    thumbnailLength: thumbLength,
+                    title: titlePtr,
+                    applicationName: appNamePtr,
+                    thumbnail: thumbnailPtr,
+                    thumbnailLength: thumbnailLength,
                     width: Int32(win.width),
                     height: Int32(win.height)
                 ))
             }
+
+            // Call the callback with the info array
             infos.withUnsafeBytes { infoBytes in
                 // Reconstruct the callback from the address
                 let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
-            // NOTE: The caller must free the C strings and thumbnail buffers after use
-            // Use free() for strdup'd strings and malloc'd thumbnail data
+            // NOTE: Strings and thumbnail data allocated with strdup()/malloc() must be freed by the .NET side
         } catch {
             // Reconstruct the callback from the address for error case
             let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
@@ -548,21 +554,26 @@ public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
         do {
             let apps = try await ScreenCapturer.getAvailableApplications()
             var infos: [ScreenStreamApplicationInfo] = []
+
             for app in apps {
-                let nameCString = strdup(app.name)!
-                let bundleCString = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
+                // Use strdup for P/Invoke compatibility - .NET expects heap-allocated strings
+                let namePtr = strdup(app.name)
+                let bundlePtr = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
+
                 infos.append(ScreenStreamApplicationInfo(
                     processId: Int32(app.processId),
-                    name: UnsafePointer(nameCString),
-                    bundleIdentifier: bundleCString != nil ? UnsafePointer(bundleCString!) : nil
+                    name: namePtr,
+                    bundleIdentifier: bundlePtr
                 ))
             }
+
+            // Call the callback with the info array
             infos.withUnsafeBytes { infoBytes in
                 // Reconstruct the callback from the address
                 let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
-            // NOTE: The caller must free the C strings after use
+            // NOTE: Strings allocated with strdup() must be freed by the .NET side
         } catch {
             // Reconstruct the callback from the address for error case
             let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
