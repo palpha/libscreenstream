@@ -18,20 +18,24 @@
 
 */
 
+import AppKit
+import CoreGraphics
+import Darwin
 import Foundation
 import ScreenCaptureKit
-import CoreGraphics
-import AppKit
-import Darwin
 
-// MARK: - Private API for window thumbnails
-fileprivate typealias CGSConnectionID = UInt32
-fileprivate let CGSMainConnectionID: CGSConnectionID = 0
+private typealias CGSConnectionID = UInt32
+private let CGSMainConnectionID: CGSConnectionID = 0
 
-fileprivate typealias CGSHWCaptureWindowListFunc = @convention(c) (CGSConnectionID, UnsafeMutablePointer<UInt32>?, Int, UInt32) -> CFArray
+private typealias CGSHWCaptureWindowListFunc = @convention(c) (
+    CGSConnectionID, UnsafeMutablePointer<UInt32>?, Int, UInt32
+) -> CFArray
 
-fileprivate func captureWindowThumbnail(windowId: UInt32) -> CGImage? {
-    guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else {
+private func captureWindowThumbnail(windowId: UInt32) -> CGImage? {
+    guard
+        let handle = dlopen(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+    else {
         return nil
     }
     defer { dlclose(handle) }
@@ -42,7 +46,7 @@ fileprivate func captureWindowThumbnail(windowId: UInt32) -> CGImage? {
 
     let fn = unsafeBitCast(sym, to: CGSHWCaptureWindowListFunc.self)
     var winId = windowId
-    let options: UInt32 = 0x2 | 0x4 | 0x8 // ignoreGlobalClipShape | bestResolution | fullSize
+    let options: UInt32 = 0x2 | 0x4 | 0x8  // ignoreGlobalClipShape | bestResolution | fullSize
     let arr = fn(CGSMainConnectionID, &winId, 1, options) as NSArray
 
     if let img = arr.firstObject {
@@ -51,12 +55,15 @@ fileprivate func captureWindowThumbnail(windowId: UInt32) -> CGImage? {
     return nil
 }
 
-fileprivate func cgImageToPNGData(_ cgImage: CGImage, size: CGSize? = nil) -> Data? {
+private func cgImageToPNGData(_ cgImage: CGImage, size: CGSize? = nil) -> Data? {
     let finalImage: CGImage
     if let size = size, cgImage.width != Int(size.width) || cgImage.height != Int(size.height) {
         let ciImage = CIImage(cgImage: cgImage)
         let context = CIContext(options: [.workingColorSpace: CGColorSpace.sRGB as Any])
-        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: size.width / CGFloat(cgImage.width), y: size.height / CGFloat(cgImage.height)))
+        let scaled = ciImage.transformed(
+            by: CGAffineTransform(
+                scaleX: size.width / CGFloat(cgImage.width),
+                y: size.height / CGFloat(cgImage.height)))
         if let scaledCG = context.createCGImage(scaled, from: CGRect(origin: .zero, size: size)) {
             finalImage = scaledCG
         } else {
@@ -66,7 +73,10 @@ fileprivate func cgImageToPNGData(_ cgImage: CGImage, size: CGSize? = nil) -> Da
         finalImage = cgImage
     }
     let mutableData = NSMutableData()
-    guard let destination = CGImageDestinationCreateWithData(mutableData, "public.png" as CFString, 1, nil) else {
+    guard
+        let destination = CGImageDestinationCreateWithData(
+            mutableData, "public.png" as CFString, 1, nil)
+    else {
         return nil
     }
     CGImageDestinationAddImage(destination, finalImage, nil)
@@ -126,7 +136,7 @@ final class BufferPool: @unchecked Sendable {
 
     private func shouldWarnAboutPressure() -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
-        if now - lastWarningTime > 5.0 { // Warn at most every 5 seconds
+        if now - lastWarningTime > 5.0 {  // Warn at most every 5 seconds
             lastWarningTime = now
             return true
         }
@@ -140,7 +150,9 @@ final class BufferPool: @unchecked Sendable {
 
             // Warn if we have too many outstanding buffers (indicates consumer can't keep up)
             if outstandingBuffers > 10 && shouldWarnAboutPressure() {
-                print("WARNING: \(outstandingBuffers) outstanding buffers - consuming code's processing may be too slow")
+                print(
+                    "WARNING: \(outstandingBuffers) outstanding buffers - consuming code's processing may be too slow"
+                )
                 print("Peak: \(peakOutstandingBuffers), Total created: \(totalBuffersCreated)")
             }
 
@@ -222,13 +234,16 @@ final class FrameDropper: @unchecked Sendable {
             // Drop frames if:
             // 1. Too many outstanding buffers (indicates consumer can't keep up)
             // 2. Frame rate is too high (less than 16ms between frames = >60 FPS)
-            let shouldDrop = stats.outstanding > 15 || (timeSinceLastFrame < 0.016 && stats.outstanding > 5)
+            let shouldDrop =
+                stats.outstanding > 15 || (timeSinceLastFrame < 0.016 && stats.outstanding > 5)
 
             if shouldDrop {
                 droppedFrameCount += 1
-                if droppedFrameCount % 10 == 0 { // Log every 10th dropped frame
+                if droppedFrameCount % 10 == 0 {  // Log every 10th dropped frame
                     let dropRate = Double(droppedFrameCount) / Double(totalFrameCount) * 100
-                    print("Frame dropping: \(droppedFrameCount)/\(totalFrameCount) (\(String(format: "%.1f", dropRate))%) - Outstanding buffers: \(stats.outstanding)")
+                    print(
+                        "Frame dropping: \(droppedFrameCount)/\(totalFrameCount) (\(String(format: "%.1f", dropRate))%) - Outstanding buffers: \(stats.outstanding)"
+                    )
                 }
             }
 
@@ -238,7 +253,8 @@ final class FrameDropper: @unchecked Sendable {
 
     func getStats() -> (dropped: Int, total: Int, dropRate: Double) {
         return queue.sync {
-            let rate = totalFrameCount > 0 ? Double(droppedFrameCount) / Double(totalFrameCount) * 100 : 0
+            let rate =
+                totalFrameCount > 0 ? Double(droppedFrameCount) / Double(totalFrameCount) * 100 : 0
             return (droppedFrameCount, totalFrameCount, rate)
         }
     }
@@ -336,15 +352,14 @@ public func StartCapture(
     regionStoppedCallback: ScreenStreamErrorCallback? = nil,
     fullScreenStoppedCallback: ScreenStreamErrorCallback? = nil
 ) -> Int32 {
-    // Validate input parameters to prevent crashes
     guard displayId >= 0,
-          x >= 0, y >= 0,
-          width > 0, height > 0,
-          frameRate > 0, fullScreenFrameRate > 0 else {
+        x >= 0, y >= 0,
+        width > 0, height > 0,
+        frameRate > 0, fullScreenFrameRate > 0
+    else {
         return CaptureError.initializationFailed.rawValue
     }
 
-    // Build config
     let config = ScreenCapturerConfig(
         displayId: displayId,
         x: x, y: y,
@@ -358,20 +373,15 @@ public func StartCapture(
         onFrameCaptured: { @Sendable frameData in
             // Check if we should drop this frame due to performance issues
             if regionFrameDropper.shouldDropFrame(bufferPool: regionBufferPool) {
-                return // Drop the frame
+                return  // Drop the frame
             }
 
-            // Get a reusable buffer from the pool
             var buffer = regionBufferPool.getBuffer(size: frameData.count)
-
-            // Copy the frame data to our managed buffer
             buffer.withUnsafeMutableBytes { bufferPtr in
                 frameData.withUnsafeBytes { dataPtr in
                     bufferPtr.copyMemory(from: dataPtr)
                 }
             }
-
-            // Call the C callback with our managed buffer
             buffer.withUnsafeBytes { bufferPointer in
                 guard let baseAddress = bufferPointer.baseAddress else {
                     regionBufferPool.returnBuffer(buffer)
@@ -381,26 +391,21 @@ public func StartCapture(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
 
-            // Return buffer to pool for reuse
             regionBufferPool.returnBuffer(buffer)
         },
         onFullScreenCaptured: { @Sendable frameData in
             // Check if we should drop this frame due to performance issues
             if fullScreenFrameDropper.shouldDropFrame(bufferPool: fullScreenBufferPool) {
-                return // Drop the frame
+                return  // Drop the frame
             }
 
-            // Get a reusable buffer from the pool
             var buffer = fullScreenBufferPool.getBuffer(size: frameData.count)
-
-            // Copy the frame data to our managed buffer
             buffer.withUnsafeMutableBytes { bufferPtr in
                 frameData.withUnsafeBytes { dataPtr in
                     bufferPtr.copyMemory(from: dataPtr)
                 }
             }
 
-            // Call the C callback with our managed buffer
             buffer.withUnsafeBytes { bufferPointer in
                 guard let baseAddress = bufferPointer.baseAddress else {
                     fullScreenBufferPool.returnBuffer(buffer)
@@ -410,11 +415,9 @@ public func StartCapture(
                     baseAddress.assumingMemoryBound(to: UInt8.self), Int32(bufferPointer.count))
             }
 
-            // Return buffer to pool for reuse
             fullScreenBufferPool.returnBuffer(buffer)
         })
 
-    // Set up stopped callbacks for C interop
     if let regionStoppedCallback = regionStoppedCallback {
         capturer.onRegionStopped = { @Sendable error in
             callErrorCallback(regionStoppedCallback, error: error)
@@ -433,7 +436,6 @@ public func StartCapture(
     Task {
         do {
             try await capturer.startCapturing()
-            // Success - capturer is already set above
         } catch let error as CaptureError {
             await MainActor.run {
                 captureStatus = error
@@ -447,7 +449,6 @@ public func StartCapture(
         }
     }
 
-    // Return success immediately since we started the async operation
     return CaptureError.success.rawValue
 }
 
@@ -458,18 +459,16 @@ public func StopCapture() -> Int32 {
     let localCapturer = globalCapturer
     globalCapturer = nil
 
-    // Start async stop, but return immediately to avoid deadlock
     Task {
         do {
             try await localCapturer?.stopCapturing()
-            // Optionally update captureStatus here if needed
         } catch {
             await MainActor.run {
                 captureStatus = .unknownError
             }
         }
     }
-    // Return current status immediately; stopped callbacks will notify C#
+
     return captureStatus.rawValue
 }
 
@@ -494,13 +493,13 @@ public func GetFullScreenBufferStats() -> Int32 {
 @_cdecl("GetRegionFrameDropStats")
 public func GetRegionFrameDropStats() -> Int32 {
     let stats = regionFrameDropper.getStats()
-    return Int32(stats.dropRate * 100) // Return drop rate as percentage * 100
+    return Int32(stats.dropRate * 100)  // Return drop rate as percentage * 100
 }
 
 @_cdecl("GetFullScreenFrameDropStats")
 public func GetFullScreenFrameDropStats() -> Int32 {
     let stats = fullScreenFrameDropper.getStats()
-    return Int32(stats.dropRate * 100) // Return drop rate as percentage * 100
+    return Int32(stats.dropRate * 100)  // Return drop rate as percentage * 100
 }
 
 @_cdecl("ResetPerformanceStats")
@@ -515,8 +514,6 @@ public struct ScreenStreamWindowInfo {
     public var processId: Int32
     public var title: UnsafePointer<CChar>?
     public var applicationName: UnsafePointer<CChar>?
-    public var thumbnail: UnsafePointer<UInt8>?
-    public var thumbnailLength: Int32
     public var width: Int32
     public var height: Int32
 }
@@ -531,8 +528,6 @@ public struct ScreenStreamApplicationInfo {
 @_cdecl("GetAvailableWindows")
 public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-
-    // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
 
     Task {
@@ -540,31 +535,31 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
             let windows = try await ScreenCapturer.getAvailableWindows()
             var infos: [ScreenStreamWindowInfo] = []
 
-            // Create window infos without thumbnails for fast initial response
             for win in windows {
                 let titlePtr = strdup(win.title)
                 let appNamePtr = strdup(win.applicationName)
-                infos.append(ScreenStreamWindowInfo(
-                    windowId: Int32(win.windowId),
-                    processId: Int32(win.processId),
-                    title: titlePtr,
-                    applicationName: appNamePtr,
-                    thumbnail: nil,
-                    thumbnailLength: 0,
-                    width: Int32(win.width),
-                    height: Int32(win.height)
-                ))
+                infos.append(
+                    ScreenStreamWindowInfo(
+                        windowId: Int32(win.windowId),
+                        processId: Int32(win.processId),
+                        title: titlePtr,
+                        applicationName: appNamePtr,
+                        width: Int32(win.width),
+                        height: Int32(win.height)
+                    ))
             }
 
-            // Call back immediately with window list (no thumbnails yet)
-            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(
+                UnsafeRawPointer(bitPattern: callbackAddress)!,
+                to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
 
         } catch {
-            // Reconstruct the callback from the address for error case
-            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(
+                UnsafeRawPointer(bitPattern: callbackAddress)!,
+                to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }
@@ -574,15 +569,15 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
 @_cdecl("GetWindowThumbnail")
 public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-
-    // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
 
     // Use background queue for thumbnail generation like AltTab
     screenshotsQueue.async {
         let data = getWindowThumbnailCG(windowId: Int(windowId))
         // Reconstruct the callback from the address
-        let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
+        let callback = unsafeBitCast(
+            UnsafeRawPointer(bitPattern: callbackAddress)!,
+            to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
         if let data = data {
             // Use same pattern as StartCapture - call within withUnsafeBytes scope
             data.withUnsafeBytes { ptr in
@@ -613,21 +608,24 @@ public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
             for app in apps {
                 let namePtr = strdup(app.name)
                 let bundlePtr = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
-                infos.append(ScreenStreamApplicationInfo(
-                    processId: Int32(app.processId),
-                    name: namePtr,
-                    bundleIdentifier: bundlePtr
-                ))
+                infos.append(
+                    ScreenStreamApplicationInfo(
+                        processId: Int32(app.processId),
+                        name: namePtr,
+                        bundleIdentifier: bundlePtr
+                    ))
             }
 
-            // Reconstruct the callback from the address
-            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(
+                UnsafeRawPointer(bitPattern: callbackAddress)!,
+                to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
         } catch {
-            // Reconstruct the callback from the address for error case
-            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(
+                UnsafeRawPointer(bitPattern: callbackAddress)!,
+                to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }

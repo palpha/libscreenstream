@@ -63,7 +63,6 @@ struct WindowInfo {
     let windowId: Int
     let processId: Int
     let applicationName: String
-    let thumbnail: Data?
     let width: Int
     let height: Int
 }
@@ -314,13 +313,11 @@ extension ScreenCapturer {
         let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         var windows: [WindowInfo] = []
         for win in shareableContent.windows {
-            // Don't generate thumbnails here - do it asynchronously like AltTab
             windows.append(WindowInfo(
                 title: win.title ?? "",
                 windowId: Int(win.windowID),
                 processId: Int(win.owningApplication?.processID ?? 0),
                 applicationName: win.owningApplication?.applicationName ?? "",
-                thumbnail: nil, // Generate asynchronously later
                 width: Int(win.frame.width),
                 height: Int(win.frame.height)
             ))
