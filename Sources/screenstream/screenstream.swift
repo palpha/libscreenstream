@@ -514,8 +514,6 @@ public struct ScreenStreamWindowInfo {
     public var processId: Int32
     public var title: UnsafePointer<CChar>?
     public var applicationName: UnsafePointer<CChar>?
-    public var thumbnail: UnsafePointer<UInt8>?  // uint8_t* (image buffer) - matches C# IntPtr
-    public var thumbnailLength: Int32             // matches C# int
     public var width: Int32
     public var height: Int32
 }
@@ -547,8 +545,6 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                         processId: Int32(win.processId),
                         title: titlePtr,
                         applicationName: appNamePtr,
-                        thumbnail: nil,  // No thumbnail data provided in this call
-                        thumbnailLength: 0,  // No thumbnail data provided in this call
                         width: Int32(win.width),
                         height: Int32(win.height)
                     ))
