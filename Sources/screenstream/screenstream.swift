@@ -514,6 +514,8 @@ public struct ScreenStreamWindowInfo {
     public var processId: Int32
     public var title: UnsafePointer<CChar>?
     public var applicationName: UnsafePointer<CChar>?
+    public var thumbnail: UnsafePointer<UInt8>?  // uint8_t* (image buffer) - matches C# IntPtr
+    public var thumbnailLength: Int32             // matches C# int
     public var width: Int32
     public var height: Int32
 }
@@ -536,6 +538,7 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
             var infos: [ScreenStreamWindowInfo] = []
 
             for win in windows {
+                // Explicitly allocate using strdup() for .NET to free with Marshal.FreeHGlobal
                 let titlePtr: UnsafePointer<CChar>? = win.title.isEmpty ? nil : UnsafePointer(strdup(win.title))
                 let appNamePtr: UnsafePointer<CChar>? = win.applicationName.isEmpty ? nil : UnsafePointer(strdup(win.applicationName))
                 infos.append(
@@ -544,6 +547,8 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                         processId: Int32(win.processId),
                         title: titlePtr,
                         applicationName: appNamePtr,
+                        thumbnail: nil,  // No thumbnail data provided in this call
+                        thumbnailLength: 0,  // No thumbnail data provided in this call
                         width: Int32(win.width),
                         height: Int32(win.height)
                     ))
@@ -579,14 +584,13 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
             UnsafeRawPointer(bitPattern: callbackAddress)!,
             to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
         if let data = data {
-            // Use same pattern as StartCapture - call within withUnsafeBytes scope
-            data.withUnsafeBytes { ptr in
-                guard let base = ptr.baseAddress else {
-                    callback(nil, 0)
-                    return
-                }
-                callback(base.assumingMemoryBound(to: UInt8.self), Int32(ptr.count))
-            }
+            // Make a copy of the data using malloc/strdup pattern for consistent memory management
+            let count = data.count
+            let buffer = malloc(count)
+            data.copyBytes(to: buffer!.assumingMemoryBound(to: UInt8.self), count: count)
+
+            // Call the callback with the malloc'd buffer that .NET will free
+            callback(buffer!.assumingMemoryBound(to: UInt8.self), Int32(count))
         } else {
             callback(nil, 0)
         }
@@ -606,8 +610,9 @@ public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
             let apps = try await ScreenCapturer.getAvailableApplications()
             var infos: [ScreenStreamApplicationInfo] = []
             for app in apps {
-                let namePtr = strdup(app.name)
-                let bundlePtr = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
+                // Explicitly allocate using strdup() for .NET to free with Marshal.FreeHGlobal
+                let namePtr = UnsafePointer(strdup(app.name))
+                let bundlePtr = app.bundleIdentifier != nil ? UnsafePointer(strdup(app.bundleIdentifier!)) : nil
                 infos.append(
                     ScreenStreamApplicationInfo(
                         processId: Int32(app.processId),
