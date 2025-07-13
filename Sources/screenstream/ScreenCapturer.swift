@@ -303,9 +303,10 @@ extension ScreenCapturer {
 
     static func getAvailableWindows() async throws -> [WindowInfo] {
         let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        return shareableContent.windows.map { win in
-            let thumbnailData = getWindowThumbnail(windowId: Int(win.windowID))
-            return WindowInfo(
+        var windows: [WindowInfo] = []
+        for win in shareableContent.windows {
+            let thumbnailData = await getWindowThumbnail(windowId: Int(win.windowID))
+            windows.append(WindowInfo(
                 title: win.title ?? "",
                 windowId: Int(win.windowID),
                 processId: Int(win.owningApplication?.processID ?? 0),
@@ -313,13 +314,52 @@ extension ScreenCapturer {
                 thumbnail: thumbnailData,
                 width: Int(win.frame.width),
                 height: Int(win.frame.height)
-            )
+            ))
         }
+        return windows
     }
 
-    static func getWindowThumbnail(windowId: Int) -> Data? {
-        let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(windowId), [.bestResolution])
-        guard let cgImage = image else { return nil }
+    static func getWindowThumbnail(windowId: Int) async -> Data? {
+        guard let shareableContent = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+              let window = shareableContent.windows.first(where: { Int($0.windowID) == windowId }) else {
+            return nil
+        }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = SCStreamConfiguration()
+        config.width = Int(window.frame.width)
+        config.height = Int(window.frame.height)
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.colorSpaceName = CGColorSpace.sRGB
+
+        var framePixelBuffer: CVPixelBuffer?
+
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let output = StreamOutputHandler { pixelBuffer in
+            framePixelBuffer = pixelBuffer
+        }
+        do {
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue.global(qos: .userInitiated))
+            try await stream.startCapture()
+        } catch {
+            return nil
+        }
+
+        // Wait for one frame using polling (max 0.5s)
+        let start = Date()
+        while framePixelBuffer == nil && Date().timeIntervalSince(start) < 0.5 {
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        }
+        do {
+            try await stream.stopCapture()
+        } catch {
+            // ignore
+        }
+
+        guard let pixelBuffer = framePixelBuffer, let cgImage = pixelBufferToCGImage(pixelBuffer) else {
+            return nil
+        }
         let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
         return bitmapRep.representation(using: .png, properties: [:])
     }

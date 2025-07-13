@@ -471,33 +471,29 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
             for win in windows {
                 let titleCString = strdup(win.title)!
                 let appNameCString = strdup(win.applicationName)!
-                let thumbPtr: UnsafePointer<UInt8>? = win.thumbnail?.withUnsafeBytes { ptr in
-                    guard let base = ptr.baseAddress else { return nil }
-                    return base.assumingMemoryBound(to: UInt8.self)
+
+                // Copy thumbnail data to C-managed memory if it exists
+                var thumbPtr: UnsafePointer<UInt8>? = nil
+                var thumbLength: Int32 = 0
+                if let thumbnail = win.thumbnail {
+                    thumbLength = Int32(thumbnail.count)
+                    let copiedData = malloc(thumbnail.count)!
+                    thumbnail.withUnsafeBytes { bytes in
+                        copiedData.copyMemory(from: bytes.baseAddress!, byteCount: thumbnail.count)
+                    }
+                    thumbPtr = UnsafePointer(copiedData.assumingMemoryBound(to: UInt8.self))
                 }
+
                 infos.append(ScreenStreamWindowInfo(
                     windowId: Int32(win.windowId),
                     processId: Int32(win.processId),
                     title: UnsafePointer(titleCString),
                     applicationName: UnsafePointer(appNameCString),
                     thumbnail: thumbPtr,
-                    thumbnailLength: Int32(win.thumbnail?.count ?? 0),
-                    width: Int32(win.thumbnail != nil ? win.thumbnail!.count : 0), // fallback if not available
-                    height: 0 // fallback, update below
+                    thumbnailLength: thumbLength,
+                    width: Int32(win.width),
+                    height: Int32(win.height)
                 ))
-                // If win has width/height properties, set them here
-                if infos.count > 0 {
-                    var last = infos[infos.count - 1]
-                    if let w = win as? (width: Int, height: Int) {
-                        last.width = Int32(w.width)
-                        last.height = Int32(w.height)
-                        infos[infos.count - 1] = last
-                    } else if let width = win.width as? Int, let height = win.height as? Int {
-                        last.width = Int32(width)
-                        last.height = Int32(height)
-                        infos[infos.count - 1] = last
-                    }
-                }
             }
             infos.withUnsafeBytes { infoBytes in
                 // Reconstruct the callback from the address
@@ -505,6 +501,7 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
             // NOTE: The caller must free the C strings and thumbnail buffers after use
+            // Use free() for strdup'd strings and malloc'd thumbnail data
         } catch {
             // Reconstruct the callback from the address for error case
             let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
@@ -517,15 +514,26 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
 @_cdecl("GetWindowThumbnail")
 public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    let callback = unsafeBitCast(callbackPtr, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
-    let data = ScreenCapturer.getWindowThumbnail(windowId: Int(windowId))
-    data?.withUnsafeBytes { ptr in
-        guard let base = ptr.baseAddress else {
+
+    // Capture the raw pointer as a sendable value
+    let callbackAddress = Int(bitPattern: callbackPtr)
+
+    Task {
+        let data = await ScreenCapturer.getWindowThumbnail(windowId: Int(windowId))
+        // Reconstruct the callback from the address
+        let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
+        if let data = data {
+            data.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else {
+                    callback(nil, 0)
+                    return
+                }
+                callback(base.assumingMemoryBound(to: UInt8.self), Int32(ptr.count))
+            }
+        } else {
             callback(nil, 0)
-            return
         }
-        callback(base.assumingMemoryBound(to: UInt8.self), Int32(ptr.count))
-    } ?? callback(nil, 0)
+    }
 }
 
 @available(macOS 12.3, *)
