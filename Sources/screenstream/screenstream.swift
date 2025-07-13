@@ -531,15 +531,15 @@ public struct ScreenStreamApplicationInfo {
 @_cdecl("GetAvailableWindows")
 public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    
+
     // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
-    
+
     Task {
         do {
             let windows = try await ScreenCapturer.getAvailableWindows()
             var infos: [ScreenStreamWindowInfo] = []
-            
+
             // Create window infos without thumbnails for fast initial response
             for win in windows {
                 let titlePtr = strdup(win.title)
@@ -555,13 +555,13 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                     height: Int32(win.height)
                 ))
             }
-            
+
             // Call back immediately with window list (no thumbnails yet)
             let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
-            
+
         } catch {
             // Reconstruct the callback from the address for error case
             let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
@@ -584,6 +584,7 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
         // Reconstruct the callback from the address
         let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
         if let data = data {
+            // Use same pattern as StartCapture - call within withUnsafeBytes scope
             data.withUnsafeBytes { ptr in
                 guard let base = ptr.baseAddress else {
                     callback(nil, 0)
@@ -601,10 +602,10 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
 @_cdecl("GetAvailableApplications")
 public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-    
+
     // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
-    
+
     Task {
         do {
             let apps = try await ScreenCapturer.getAvailableApplications()
@@ -618,7 +619,7 @@ public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
                     bundleIdentifier: bundlePtr
                 ))
             }
-            
+
             // Reconstruct the callback from the address
             let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
