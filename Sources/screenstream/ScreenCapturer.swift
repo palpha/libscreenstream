@@ -314,13 +314,13 @@ extension ScreenCapturer {
         let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         var windows: [WindowInfo] = []
         for win in shareableContent.windows {
-            let thumbnailData = await getWindowThumbnail(windowId: Int(win.windowID))
+            // Don't generate thumbnails here - do it asynchronously like AltTab
             windows.append(WindowInfo(
                 title: win.title ?? "",
                 windowId: Int(win.windowID),
                 processId: Int(win.owningApplication?.processID ?? 0),
                 applicationName: win.owningApplication?.applicationName ?? "",
-                thumbnail: thumbnailData,
+                thumbnail: nil, // Generate asynchronously later
                 width: Int(win.frame.width),
                 height: Int(win.frame.height)
             ))
@@ -329,60 +329,8 @@ extension ScreenCapturer {
     }
 
     static func getWindowThumbnail(windowId: Int) async -> Data? {
-        guard let shareableContent = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
-              let window = shareableContent.windows.first(where: { Int($0.windowID) == windowId }) else {
-            return nil
-        }
-
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = SCStreamConfiguration()
-        config.width = Int(window.frame.width)
-        config.height = Int(window.frame.height)
-        config.pixelFormat = kCVPixelFormatType_32BGRA
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        config.colorSpaceName = CGColorSpace.sRGB
-
-        var framePixelBuffer: CVPixelBuffer?
-
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-        let output = StreamOutputHandler { pixelBuffer in
-            framePixelBuffer = pixelBuffer
-        }
-        do {
-            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue.global(qos: .userInitiated))
-            try await stream.startCapture()
-        } catch {
-            return nil
-        }
-
-        // Wait for one frame using polling (max 0.5s)
-        let start = Date()
-        while framePixelBuffer == nil && Date().timeIntervalSince(start) < 0.5 {
-            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
-        }
-        do {
-            try await stream.stopCapture()
-        } catch {
-            // ignore
-        }
-
-        guard let pixelBuffer = framePixelBuffer, let cgImage = pixelBufferToCGImage(pixelBuffer) else {
-            return nil
-        }
-
-        // Use modern ImageIO for PNG encoding (more efficient than NSBitmapImageRep)
-        let mutableData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(mutableData, UTType.png.identifier as CFString, 1, nil) else {
-            return nil
-        }
-
-        CGImageDestinationAddImage(destination, cgImage, nil)
-
-        guard CGImageDestinationFinalize(destination) else {
-            return nil
-        }
-
-        return Data(mutableData)
+        // Use public API only for now to avoid crash with private API
+        return getWindowThumbnailCG(windowId: windowId)
     }
 }
 

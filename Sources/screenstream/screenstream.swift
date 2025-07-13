@@ -24,6 +24,76 @@ import CoreGraphics
 import AppKit
 import Darwin
 
+// MARK: - Private API for window thumbnails
+fileprivate typealias CGSConnectionID = UInt32
+fileprivate let CGSMainConnectionID: CGSConnectionID = 0
+
+fileprivate typealias CGSHWCaptureWindowListFunc = @convention(c) (CGSConnectionID, UnsafeMutablePointer<UInt32>?, Int, UInt32) -> CFArray
+
+fileprivate func captureWindowThumbnail(windowId: UInt32) -> CGImage? {
+    guard let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY) else {
+        return nil
+    }
+    defer { dlclose(handle) }
+
+    guard let sym = dlsym(handle, "CGSHWCaptureWindowList") else {
+        return nil
+    }
+
+    let fn = unsafeBitCast(sym, to: CGSHWCaptureWindowListFunc.self)
+    var winId = windowId
+    let options: UInt32 = 0x2 | 0x4 | 0x8 // ignoreGlobalClipShape | bestResolution | fullSize
+    let arr = fn(CGSMainConnectionID, &winId, 1, options) as NSArray
+
+    if let img = arr.firstObject {
+        return Unmanaged<CGImage>.fromOpaque(img as! UnsafeRawPointer).takeUnretainedValue()
+    }
+    return nil
+}
+
+fileprivate func cgImageToPNGData(_ cgImage: CGImage, size: CGSize? = nil) -> Data? {
+    let finalImage: CGImage
+    if let size = size, cgImage.width != Int(size.width) || cgImage.height != Int(size.height) {
+        let ciImage = CIImage(cgImage: cgImage)
+        let context = CIContext(options: [.workingColorSpace: CGColorSpace.sRGB as Any])
+        let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: size.width / CGFloat(cgImage.width), y: size.height / CGFloat(cgImage.height)))
+        if let scaledCG = context.createCGImage(scaled, from: CGRect(origin: .zero, size: size)) {
+            finalImage = scaledCG
+        } else {
+            finalImage = cgImage
+        }
+    } else {
+        finalImage = cgImage
+    }
+    let mutableData = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(mutableData, "public.png" as CFString, 1, nil) else {
+        return nil
+    }
+    CGImageDestinationAddImage(destination, finalImage, nil)
+    guard CGImageDestinationFinalize(destination) else {
+        return nil
+    }
+    return Data(mutableData)
+}
+
+// Background queue for screenshot generation like AltTab
+let screenshotsQueue = DispatchQueue(label: "screenshots", qos: .userInteractive)
+
+func getWindowThumbnailCG(windowId: Int, size: CGSize? = nil) -> Data? {
+    // Use only public API for now - private API causes crashes in async contexts
+    let winId = UInt32(windowId)
+    let image = CGWindowListCreateImage(
+        CGRect.null,
+        .optionIncludingWindow,
+        CGWindowID(winId),
+        [.boundsIgnoreFraming, .bestResolution]
+    )
+    if let cgImage = image {
+        return cgImageToPNGData(cgImage, size: size)
+    }
+    return nil
+}
+
 enum CaptureError: Int32, Error {
     case success = 0
     case initializationFailed = 1
@@ -461,56 +531,40 @@ public struct ScreenStreamApplicationInfo {
 @_cdecl("GetAvailableWindows")
 public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-
-    // Capture the raw pointer as a sendable value using the recommended approach
+    
+    // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
-
+    
     Task {
         do {
             let windows = try await ScreenCapturer.getAvailableWindows()
             var infos: [ScreenStreamWindowInfo] = []
-
+            
+            // Create window infos without thumbnails for fast initial response
             for win in windows {
-                // Use strdup for P/Invoke compatibility - .NET expects heap-allocated strings
                 let titlePtr = strdup(win.title)
                 let appNamePtr = strdup(win.applicationName)
-
-                // Copy thumbnail data if it exists
-                var thumbnailPtr: UnsafePointer<UInt8>? = nil
-                var thumbnailLength: Int32 = 0
-                if let thumbnail = win.thumbnail {
-                    thumbnailLength = Int32(thumbnail.count)
-                    let allocatedThumbnail = malloc(thumbnail.count)?.assumingMemoryBound(to: UInt8.self)
-                    thumbnail.withUnsafeBytes { bytes in
-                        if let allocated = allocatedThumbnail, let source = bytes.baseAddress {
-                            memcpy(allocated, source, thumbnail.count)
-                        }
-                    }
-                    thumbnailPtr = UnsafePointer(allocatedThumbnail)
-                }
-
                 infos.append(ScreenStreamWindowInfo(
                     windowId: Int32(win.windowId),
                     processId: Int32(win.processId),
                     title: titlePtr,
                     applicationName: appNamePtr,
-                    thumbnail: thumbnailPtr,
-                    thumbnailLength: thumbnailLength,
+                    thumbnail: nil,
+                    thumbnailLength: 0,
                     width: Int32(win.width),
                     height: Int32(win.height)
                 ))
             }
-
-            // Call the callback with the info array
+            
+            // Call back immediately with window list (no thumbnails yet)
+            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
-                // Reconstruct the callback from the address
-                let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
-            // NOTE: Strings and thumbnail data allocated with strdup()/malloc() must be freed by the .NET side
+            
         } catch {
             // Reconstruct the callback from the address for error case
-            let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }
@@ -521,13 +575,14 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
 public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
 
-    // Capture the raw pointer as a sendable value
+    // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
 
-    Task {
-        let data = await ScreenCapturer.getWindowThumbnail(windowId: Int(windowId))
+    // Use background queue for thumbnail generation like AltTab
+    screenshotsQueue.async {
+        let data = getWindowThumbnailCG(windowId: Int(windowId))
         // Reconstruct the callback from the address
-        let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
+        let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafePointer<UInt8>?, Int32) -> Void).self)
         if let data = data {
             data.withUnsafeBytes { ptr in
                 guard let base = ptr.baseAddress else {
@@ -546,37 +601,32 @@ public func GetWindowThumbnail(windowId: Int32, callbackPtr: UnsafeRawPointer?) 
 @_cdecl("GetAvailableApplications")
 public func GetAvailableApplications(callbackPtr: UnsafeRawPointer?) {
     guard let callbackPtr = callbackPtr else { return }
-
-    // Capture the raw pointer as a sendable value
+    
+    // Capture the callback address for Sendable compatibility
     let callbackAddress = Int(bitPattern: callbackPtr)
-
+    
     Task {
         do {
             let apps = try await ScreenCapturer.getAvailableApplications()
             var infos: [ScreenStreamApplicationInfo] = []
-
             for app in apps {
-                // Use strdup for P/Invoke compatibility - .NET expects heap-allocated strings
                 let namePtr = strdup(app.name)
                 let bundlePtr = app.bundleIdentifier != nil ? strdup(app.bundleIdentifier!) : nil
-
                 infos.append(ScreenStreamApplicationInfo(
                     processId: Int32(app.processId),
                     name: namePtr,
                     bundleIdentifier: bundlePtr
                 ))
             }
-
-            // Call the callback with the info array
+            
+            // Reconstruct the callback from the address
+            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             infos.withUnsafeBytes { infoBytes in
-                // Reconstruct the callback from the address
-                let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
                 callback(infoBytes.baseAddress, Int32(infos.count))
             }
-            // NOTE: Strings allocated with strdup() must be freed by the .NET side
         } catch {
             // Reconstruct the callback from the address for error case
-            let callback = unsafeBitCast(callbackAddress, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
+            let callback = unsafeBitCast(UnsafeRawPointer(bitPattern: callbackAddress)!, to: (@convention(c) (UnsafeRawPointer?, Int32) -> Void).self)
             callback(nil, 0)
         }
     }
