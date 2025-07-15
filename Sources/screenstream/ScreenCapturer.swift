@@ -65,6 +65,9 @@ struct WindowInfo {
     let applicationName: String
     let width: Int
     let height: Int
+    let layer: Int
+    let alpha: Float
+    let isOnScreen: Bool
 }
 
 @available(macOS 12.3, *)
@@ -311,15 +314,29 @@ extension ScreenCapturer {
 
     static func getAvailableWindows() async throws -> [WindowInfo] {
         let shareableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let cgWindows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         var windows: [WindowInfo] = []
         for win in shareableContent.windows {
+            // Find matching CGWindow info by windowID
+            let cgInfo = cgWindows.first { cgWin in
+                if let cgId = cgWin[kCGWindowNumber as String] as? Int, cgId == Int(win.windowID) {
+                    return true
+                }
+                return false
+            }
+            let layer = (cgInfo?[kCGWindowLayer as String] as? Int) ?? 0
+            let alpha = (cgInfo?[kCGWindowAlpha as String] as? Float) ?? 1.0
+            let isOnScreen = (cgInfo?[kCGWindowIsOnscreen as String] as? Bool) ?? true
             windows.append(WindowInfo(
                 title: win.title ?? "",
                 windowId: Int(win.windowID),
                 processId: Int(win.owningApplication?.processID ?? 0),
                 applicationName: win.owningApplication?.applicationName ?? "",
                 width: Int(win.frame.width),
-                height: Int(win.frame.height)
+                height: Int(win.frame.height),
+                layer: layer,
+                alpha: alpha,
+                isOnScreen: isOnScreen
             ))
         }
         return windows

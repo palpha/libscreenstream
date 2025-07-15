@@ -516,6 +516,9 @@ public struct ScreenStreamWindowInfo {
     public var applicationName: UnsafePointer<CChar>?
     public var width: Int32
     public var height: Int32
+    public var layer: Int32
+    public var alpha: Float
+    public var isOnScreen: Int32 // 0 = false, 1 = true
 }
 
 public struct ScreenStreamApplicationInfo {
@@ -546,7 +549,10 @@ public func GetAvailableWindows(callbackPtr: UnsafeRawPointer?) {
                         title: titlePtr,
                         applicationName: appNamePtr,
                         width: Int32(win.width),
-                        height: Int32(win.height)
+                        height: Int32(win.height),
+                        layer: Int32(win.layer),
+                        alpha: Float(win.alpha),
+                        isOnScreen: win.isOnScreen ? 1 : 0
                     ))
             }
 

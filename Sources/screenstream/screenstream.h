@@ -15,6 +15,9 @@ typedef struct {
     const char* applicationName;
     int32_t width;
     int32_t height;
+    int32_t layer;
+    float alpha;
+    int32_t isOnScreen; // 0 = false, 1 = true
 } ScreenStreamWindowInfo;
 
 // Callback for window list
