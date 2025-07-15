@@ -283,9 +283,11 @@ class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
                 rowBytes: expectedBytesPerRow
             )
 
-            // Convert BGRA to RGB using vImage (much faster than manual loops)
-            let permuteMap: [UInt8] = [2, 1, 0] // B->R, G->G, R->B (drop A)
-            vImagePermuteChannels_ARGB8888(&srcBuffer, &dstBuffer, permuteMap, vImage_Flags(kvImageNoFlags))
+            // Convert BGRA8888 to RGB888 using vImage
+            let error = vImageConvert_BGRA8888toRGB888(&srcBuffer, &dstBuffer, vImage_Flags(kvImageNoFlags))
+            if error != kvImageNoError {
+                print("vImageConvert_BGRA8888toRGB888 error: \(error)")
+            }
         }
 
         // Call the callback directly since onFrameCaptured is already @Sendable
